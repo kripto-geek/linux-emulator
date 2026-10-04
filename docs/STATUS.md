@@ -5,55 +5,73 @@ Running status log. Updated at the end of every phase (and on major discoveries)
 Legend: `[W]` works / measured · `[B]` broken / known issue · `[N]` next · `[D]` decision
 
 ## Phase 0 - Environment & Discovery  ✅ COMPLETE
+(see git history; doctor baseline post-install: **18 passed, 0 failures**.)
 
-### Findings (measured on this host, 2026-10-05)
+## Phase 1 - Boot a GPU-accelerated Android VM  🟡 PARTIAL (critical GPU finding)
 
-| Item | Result |
-|---|---|
-| OS | Omarchy 4.0.4 (Arch-based), kernel `7.2.5-3-omarchy` |
-| CPU | AMD Ryzen 9 5900HS, 16 cores — `svm` (AMD-V) on, AVX/AVX2 |
-| `/dev/kvm` | present, `0666`, user can read/write |
-| GPU | **NVIDIA RTX 3050 Mobile** (active GL, driver 610.57) + AMD Cezanne iGPU |
-| Session | **Wayland** (Hyprland) |
-| Audio | PipeWire 1.6.8 active |
+### Done & measured
+- [W] **`core/` C++20 library**: `QemuCommandBuilder` + `QmpClient` (with a
+  self-contained JSON parser). **35 gtest cases pass.**
+- [W] **QEMU 11 command-line verified live** against the installed `qemu 11.1.1`.
+  Several "obvious" flags turned out to be wrong for QEMU 11 and were fixed +
+  unit-tested:
+  | Flag | What QEMU 11 actually wants |
+  |---|---|
+  | `-window` | **not an option** — SDL window sizes to guest framebuffer |
+  | `-audio` | `driver=pipewire` only (no `in.engines=`/`out.engines=`) |
+  | `-drive` | no `detect_zeroes=` on qcow2 |
+  | `virtio-gpu-gl-pci` | **no `gl`/`mem-mb`/`max_scanouts` props**; virgl needs `-display sdl,gl=on` |
+  | audio | `hda-duplex` needs the HDA bus → add `ich9-intel-hda` |
+- [W] **`tools/run-service.sh`** — runs an instance as a *systemd user service*
+  so it outlives the launching shell (this environment reaps the tool's whole
+  process group, so plain `nohup`/`setsid` backgrounding does not survive).
+- [W] **ISO downloaded + SHA-256 verified** (`735cb9…ba68e` exact match),
+  read-only `base.qcow2` (16 GiB sparse) created.
+- [W] **VM boots stably** via systemd: KVM + q35 + slirp (hostfwd ADB:5555) +
+  PipeWire audio + `virtio-gpu-pci`. QEMU alive >90 s, ADB hostfwd port open,
+  guest reachable on 10.0.2.15. No crashes.
 
-### Decisions
-- **[D] Guest image:** Bliss OS 16.9.7 x86_64 FOSS (Generic). SHA-256 `735cb9...ba68e`. FOSS = no gapps/houdini, ships `libndk_translation`.
-- **[D] Hypervisor:** QEMU + KVM, QMP over unix socket. No libvirt.
-- **[D] Graphics:** `virtio-gpu-gl-pci` (virgl) first. NVIDIA host driver is active; virglrenderer uses the DRI3/GL context.
-- **[D] Audio:** QEMU `-audio driver=pipewire`.
-- **[D] Network:** slirp + host-forwarded ADB port per instance.
-- **[D] Storage:** read-only qcow2 base + per-instance qcow2 overlay.
+### ⚠ Critical finding: virgl does NOT work on this host
+- [B] **`-display sdl,gl=on` + `virtio-gpu-gl-pci` fails to initialize virgl:**
+  ```
+  Unable to create OpenGL context >= 3.0
+  failed to initialize vrend renderer
+  qemu-system-x86_64: virgl could not be initialized: 22
+  ```
+  Root cause: this is an **NVIDIA-dominant laptop** (RTX 3050 Mobile as the
+  active GL provider, driver 610.57). `virglrenderer` is a **Mesa** library and
+  cannot create a GL context on the proprietary NVIDIA driver. The AMD Cezanne
+  iGPU exposes **no usable Mesa render node** (`DRI_PRIME`/explicit card
+  selection both still report NVIDIA; the iGPU has no Mesa GL path on this
+  system). QEMU falls back to software rendering and the VM still boots.
+- **[D] Decision:** for this host the Phase 1 acceptance ("GPU acceleration
+  actually active, not SwiftShader") **cannot be met with virgl**. Options, in
+  order of preference:
+  1. **Documented fallback to `virtio-gpu-pci` (software)** — works today,
+     usable for bring-up and non-gaming use; not the performance target.
+  2. **Venus (Vulkan, `-device virtio-vulkan-pci`)** — needs a Vulkan ICD the
+     host exposes to QEMU; `nvidia_icd.json` is present, so this is the most
+     promising path to *hardware* acceleration on this machine. → Phase 2
+     experiment.
+  3. **Force a Mesa-owned DRI node** (e.g. kernel `video=efifb`/`nomodeset`
+     for the iGPU, or a headless offload setup) so virglrenderer gets a
+     working context. Fragile on a dual-GPU laptop; last resort.
 
-### Files
-- `tools/doctor`, `tools/install-deps.sh`, `docs/STATUS.md`, `README.md`, `THIRD_PARTY.md`, `COPYING`.
-- doctor baseline post-install: **18 passed, 3 warnings (non-blocking), 0 failures**.
+### Acceptance status
+- [W] Boots reliably (stable >90 s, no crash).
+- [W] `adb connect` reachable (hostfwd port open, guest on 10.0.2.15).
+- [N] **60 FPS / GPU-accelerated rendering: NOT met on this host** (virgl
+  blocked by NVIDIA driver). Re-measure after the Venus experiment.
+- [N] Confirm `ro.product.cpu.abilist` includes `arm64-v8a` (needs a booted,
+  post-install guest — see next step).
 
-## Phase 1 - Boot a GPU-accelerated Android VM  🔄 IN PROGRESS
-
-### Done
-- [W] **`core/` C++20 library** (UI-independent, no Qt dep):
-  - `QemuCommandBuilder` — emits full QEMU argv: q35, KVM, virtio-gpu-gl-pci (virgl), PipeWire audio + HDA, slirp + hostfwd ADB, QMP socket, SMBIOS instance-id serial, linked-clone overlay drive, `-S` start-paused.
-  - `QmpClient` — line-oriented QMP over unix socket (handshake, `execute`, `cont`/`stop`/`quit`, `query-status`, HMP escape) + self-contained JSON parser/dumper.
-- [W] **35 gtest unit tests** all passing (22 builder + 13 JSON).
-- [W] CMake build: `core` always, `tests` always, `app` when Qt6 present.
-- [W] `app/` minimal Qt6 Widgets bootstrap (proves Qt links against core).
-- [W] `tools/image-prep.sh` — download + SHA-256 verify + create read-only base qcow2.
-- [W] `tools/boot.sh` — creates overlay (linked clone) and launches QEMU. Mirrors `QemuCommandBuilder` (cross-checked by tests).
-- [N] Bliss OS ISO download in progress (~670 MB / 1.75 GB, ~1.7 MB/s).
-
-### Next (to hit Phase 1 acceptance)
-- [N] Finish ISO download; verify SHA-256 via `tools/image-prep.sh`.
-- [N] Boot with `tools/boot.sh demo --first-boot`; confirm guest reaches GRUB/Android.
-- [N] Confirm GPU is hardware-accelerated in-guest (GL renderer string, not SwiftShader).
-- [N] `adb connect 127.0.0.1:<port>` lists the instance.
-- [N] Install a test APK; measure boot time (< 60 s target).
-- [N] Document per-GPU results (NVIDIA vs iGPU) in `docs/`.
-
-### Known risks
-- [B] **virgl on NVIDIA host** — virglrenderer is a Mesa library; it should work via the NVIDIA DRI3 context, but this is untested. Fallback: force the AMD iGPU, or drop to `-device virtio-gpu-pci` (software).
-- [B] **First-boot install** — the base qcow2 is created *empty*; the actual Android install happens by booting the ISO and running the installer. This is a one-time semi-manual step (documented). A fully automated install (kickstart-style) is a Phase 3 nicety.
-- [N] `libndk_translation` verification — must confirm `ro.product.cpu.abilist` includes `arm64-v8a`/`armeabi-v7a` after boot.
+### Next
+- [N] Drive a full install: boot the ISO, run the Android-x86 installer to the
+      overlay (one-time, semi-manual — documented), then boot the installed
+      system and confirm home screen + `ro.product.cpu.abilist` + GL renderer.
+- [N] **Venus experiment** (`virtio-vulkan-pci` + NVIDIA Vulkan ICD) to get
+      real hardware acceleration; document per-GPU results in `docs/gpu.md`.
+- [N] Measure input latency (Phase 2) once a stable display path is chosen.
 
 ## Phase 2 - Touch-injection research spike  ⏸ NOT STARTED
 ## Phase 3 - The gaming shell  ⏸ NOT STARTED
