@@ -239,3 +239,72 @@ TEST(QemuCommandBuilder, SmartedPathsAreQuotedInCommandLine) {
     // bearing path; verify it is wrapped in double quotes.
     EXPECT_NE(line.find("\"file=/tmp/a base image"), std::string::npos);
 }
+
+#include <unistd.h>  // access()
+
+// ---------------------------------------------------------------------------
+// envForGpu() – Mesa EGL ICD override for dual-GPU NVIDIA+iGPU hosts
+// ---------------------------------------------------------------------------
+
+TEST(QemuCommandBuilder, EnvForGpuNonVirglIsEmpty) {
+    // VirtioGpu and Venus modes don't need env overrides.
+    droidforge::InstanceConfig cfg;
+    cfg.instance_id   = "a";
+    cfg.overlay_image = "/tmp/ov.qcow2";
+    cfg.gpu_mode      = GpuMode::VirtioGpu;
+    QemuCommandBuilder builder;
+    auto env = builder.envForGpu(cfg);
+    EXPECT_TRUE(env.empty());
+}
+
+TEST(QemuCommandBuilder, EnvForGpuVenusIsEmpty) {
+    droidforge::InstanceConfig cfg;
+    cfg.instance_id   = "a";
+    cfg.overlay_image = "/tmp/ov.qcow2";
+    cfg.gpu_mode      = GpuMode::Venus;
+    QemuCommandBuilder builder;
+    auto env = builder.envForGpu(cfg);
+    EXPECT_TRUE(env.empty());
+}
+
+TEST(QemuCommandBuilder, EnvForGpuVirglAdaptsToHost) {
+    // On this test host both 10_nvidia.json and 50_mesa.json are present
+    // (Arch with NVIDIA driver + Mesa). envForGpu() must emit three Mesa-EGL
+    // override vars. On a pure-Mesa host the map is empty.
+    droidforge::InstanceConfig cfg;
+    cfg.instance_id   = "a";
+    cfg.overlay_image = "/tmp/ov.qcow2";
+    cfg.gpu_mode      = GpuMode::Virgl;
+    QemuCommandBuilder builder;
+    auto env = builder.envForGpu(cfg);
+
+    const bool nvidia_present =
+        ::access("/usr/share/glvnd/egl_vendor.d/10_nvidia.json", F_OK) == 0;
+    const bool mesa_present =
+        ::access("/usr/share/glvnd/egl_vendor.d/50_mesa.json", F_OK) == 0;
+
+    if (nvidia_present && mesa_present) {
+        EXPECT_FALSE(env.empty()) << "NVIDIA+Mesa host should emit env overrides";
+        EXPECT_EQ(env.count("EGL_PLATFORM"), 1u);
+        EXPECT_EQ(env.at("EGL_PLATFORM"), "gbm");
+        EXPECT_EQ(env.count("__EGL_VENDOR_LIBRARY_FILENAMES"), 1u);
+        EXPECT_NE(env.at("__EGL_VENDOR_LIBRARY_FILENAMES").find("50_mesa"),
+                  std::string::npos);
+        EXPECT_EQ(env.count("LIBGL_DRIVERS_PATH"), 1u);
+    } else {
+        // Pure-Mesa host: no overrides needed.
+        EXPECT_TRUE(env.empty()) << "Pure-Mesa host should emit no env overrides";
+    }
+}
+
+TEST(QemuCommandBuilder, VenusFallbackToVirtioGpu) {
+    // Venus (virtio-vulkan-pci) is not in Arch QEMU 11.1.1.
+    // The builder falls back to virtio-gpu-pci (software) for now.
+    droidforge::InstanceConfig cfg;
+    cfg.instance_id   = "a";
+    cfg.overlay_image = "/tmp/ov.qcow2";
+    cfg.gpu_mode      = GpuMode::Venus;
+    QemuCommandBuilder builder;
+    auto argv = builder.build(cfg);
+    EXPECT_EQ(valueAfter(argv, "-device"), "virtio-gpu-pci");
+}

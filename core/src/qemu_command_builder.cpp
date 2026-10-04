@@ -11,6 +11,8 @@
 
 #include "droidforge/qemu_command_builder.hpp"
 
+#include <sys/stat.h>
+
 #include <stdexcept>
 #include <string>
 
@@ -132,11 +134,42 @@ std::vector<std::string> QemuCommandBuilder::gpu(const InstanceConfig& cfg) cons
         case GpuMode::VirtioGpu:
             a = {"-device", "virtio-gpu-pci"};
             break;
-        case GpuMode::Veniam:
-            a = {"-device", "virtio-vulkan-pci"};
+        case GpuMode::Venus:
+            // Venus (virtio-vulkan-pci) is not compiled into Arch QEMU 11.1.1.
+            // Kept as a placeholder; falls back to virtio-gpu-pci for now.
+            a = {"-device", "virtio-gpu-pci"};
             break;
     }
     return a;
+}
+
+QemuCommandBuilder::EnvMap QemuCommandBuilder::envForGpu(const InstanceConfig& cfg) const {
+    // On NVIDIA-primary laptops the active EGL vendor is libEGL_nvidia.so.
+    // virglrenderer is a Mesa library that needs a Mesa GL 3.3+ context.
+    // Fix: force the Mesa EGL ICD and point it at the AMD/Intel render node
+    // via the GBM platform (render-only, no display server involvement).
+    //
+    // For pure-Mesa hosts (AMD-only, Intel-only) this map is empty because
+    // the default EGL vendor is already Mesa and no override is needed.
+    //
+    // Detect: if /usr/share/glvnd/egl_vendor.d/10_nvidia.json exists, we
+    // are on an NVIDIA system and the override is required.
+    //
+    // See docs/gpu.md for the full explanation.
+    EnvMap env;
+    if (cfg.gpu_mode != GpuMode::Virgl) return env;
+
+    // Check for NVIDIA EGL ICD presence (heuristic: file exists)
+    struct stat st{};
+    const char* nvidia_icd = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json";
+    const char* mesa_icd   = "/usr/share/glvnd/egl_vendor.d/50_mesa.json";
+    if (::stat(nvidia_icd, &st) == 0 && ::stat(mesa_icd, &st) == 0) {
+        // NVIDIA ICD present → must force Mesa EGL for virglrenderer.
+        env["__EGL_VENDOR_LIBRARY_FILENAMES"] = mesa_icd;
+        env["EGL_PLATFORM"]                   = "gbm";
+        env["LIBGL_DRIVERS_PATH"]             = "/usr/lib/dri";
+    }
+    return env;
 }
 
 std::vector<std::string> QemuCommandBuilder::display(const InstanceConfig& cfg) const {

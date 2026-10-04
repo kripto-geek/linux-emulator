@@ -97,6 +97,27 @@ if [[ ! -f "$OVERLAY" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# GPU environment setup for virgl on dual-GPU (NVIDIA primary) hosts.
+#
+# virglrenderer is a Mesa library; on NVIDIA-primary laptops the active EGL
+# vendor is libEGL_nvidia.so, which cannot give virglrenderer the Mesa GL 3.3+
+# context it needs.  Fix: force Mesa EGL ICD + GBM platform so virglrenderer
+# uses the AMD/Intel iGPU render node (renderD129 on this machine), which
+# provides OpenGL 4.6 via radeonsi/iris.
+#
+# Detection: if both 10_nvidia.json and 50_mesa.json exist in the GLVND dir,
+# we are on an NVIDIA-primary host and need the override.
+# On pure-Mesa hosts (AMD-only, Intel-only) no override is applied.
+# ---------------------------------------------------------------------------
+GLVND_DIR=/usr/share/glvnd/egl_vendor.d
+if [[ -f "$GLVND_DIR/10_nvidia.json" && -f "$GLVND_DIR/50_mesa.json" ]]; then
+    echo "[$INSTANCE] NVIDIA EGL ICD detected → forcing Mesa EGL for virglrenderer"
+    export __EGL_VENDOR_LIBRARY_FILENAMES="$GLVND_DIR/50_mesa.json"
+    export EGL_PLATFORM=gbm
+    export LIBGL_DRIVERS_PATH=/usr/lib/dri
+fi
+
+# ---------------------------------------------------------------------------
 # Assemble the QEMU command. Mirrors core/QemuCommandBuilder (unit-tested).
 # ---------------------------------------------------------------------------
 ARGS=(

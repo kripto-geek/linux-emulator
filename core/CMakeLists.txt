@@ -2,6 +2,8 @@
 add_library(droidforge_core STATIC
     src/qemu_command_builder.cpp
     src/qmp_client.cpp
+    src/touch_injector.cpp
+    src/adb_client.cpp
 )
 
 target_include_directories(droidforge_core

@@ -7,6 +7,7 @@ find_package(GTest REQUIRED)
 add_executable(core_tests
     test_qemu_command_builder.cpp
     test_json.cpp
+    test_touch_injector.cpp
 )
 
 target_link_libraries(core_tests

@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -19,7 +20,7 @@ namespace droidforge {
 enum class GpuMode {
     Virgl,        // -device virtio-gpu-gl-pci (first-class, host-GL accelerated)
     VirtioGpu,    // -device virtio-gpu-pci (software / no host GL)
-    Veniam        // experimental Vulkan (Venus); emitted when we support it
+    Venus         // experimental Vulkan (Venus); not yet in Arch QEMU 11.1.1
 };
 
 // ---------------------------------------------------------------------------
@@ -103,6 +104,22 @@ public:
     std::vector<std::string> audio(const InstanceConfig& cfg) const;
     std::vector<std::string> network(const InstanceConfig& cfg) const;
     std::vector<std::string> qmp(const InstanceConfig& cfg) const;
+
+    // Returns the environment-variable additions required to launch QEMU with
+    // virglrenderer using the Mesa EGL backend on dual-GPU laptops where the
+    // active EGL vendor is NVIDIA proprietary.
+    //
+    // Usage: apply these vars to the process environment before execvpe() or
+    // before QProcess::start(). On pure-Mesa hosts (AMD/Intel only) the map
+    // will be empty (no overrides needed).
+    //
+    //   EGL_PLATFORM                  = gbm
+    //   __EGL_VENDOR_LIBRARY_FILENAMES = /usr/share/glvnd/egl_vendor.d/50_mesa.json
+    //   LIBGL_DRIVERS_PATH            = /usr/lib/dri
+    //
+    // Only emitted for GpuMode::Virgl. Other modes return an empty map.
+    using EnvMap = std::map<std::string, std::string>;
+    EnvMap envForGpu(const InstanceConfig& cfg) const;
 
     const std::string& qemuBinary() const { return qemu_bin_; }
     void setQemuBinary(std::string bin) { qemu_bin_ = std::move(bin); }
