@@ -102,7 +102,7 @@ std::vector<std::string> QemuCommandBuilder::disk(const InstanceConfig& cfg) con
     std::vector<std::string> a;
     a.push_back("-drive");
     a.push_back("file=" + cfg.overlay_image +
-                ",if=virtio,format=qcow2,cache=none,aio=threads,detect_zeroes=on");
+                ",if=virtio,format=qcow2,cache=none,aio=threads");
     return a;
 }
 
@@ -119,37 +119,38 @@ std::vector<std::string> QemuCommandBuilder::bootIso(const std::string& iso_path
 }
 
 std::vector<std::string> QemuCommandBuilder::gpu(const InstanceConfig& cfg) const {
+    // NOTE: on QEMU 11 the virtio-gpu devices expose no `mem-mb` /
+    // `max_scanouts` / `gl` properties. GPU memory is governed by `hostmem`/
+    // `max_hostmem` (set via -global when needed) and scanouts default to 3.
+    // Virgl is enabled via the display backend `-display <backend>,gl=on`
+    // (see display()).
     std::vector<std::string> a;
-    std::string memmb = "mem-mb=" + std::to_string(cfg.gpu_mem_mb);
-    std::string scanouts = "max_scanouts=" + std::to_string(cfg.max_scanlines);
     switch (cfg.gpu_mode) {
         case GpuMode::Virgl:
-            a = {"-device", "virtio-gpu-gl-pci," + memmb + "," + scanouts + ",gl=max"};
+            a = {"-device", "virtio-gpu-gl-pci"};
             break;
         case GpuMode::VirtioGpu:
-            a = {"-device", "virtio-gpu-pci," + memmb + "," + scanouts};
+            a = {"-device", "virtio-gpu-pci"};
             break;
         case GpuMode::Veniam:
-            // Venus (Vulkan) - experimental. Emits virtio-vulkan-pci when the
-            // build supports it; otherwise the boot script downgrades to virgl.
-            a = {"-device", "virtio-vulkan-pci," + memmb};
+            a = {"-device", "virtio-vulkan-pci"};
             break;
     }
     return a;
 }
 
 std::vector<std::string> QemuCommandBuilder::display(const InstanceConfig& cfg) const {
+    // QEMU 11 has no -window flag; the SDL/GTK window sizes to the guest's
+    // framebuffer. GL is enabled on the display backend (required for
+    // virtio-gpu-gl-pci / virgl) via the `,gl=on` backend option.
     std::vector<std::string> a;
+    const bool want_gl = (cfg.gpu_mode == GpuMode::Virgl);
     switch (cfg.display) {
         case DisplayBackend::Sdl:
-            a = {"-display", "sdl",
-                 "-window", "width=" + std::to_string(cfg.width) +
-                            ",height=" + std::to_string(cfg.height)};
+            a = {"-display", "sdl" + std::string(want_gl ? ",gl=on" : "")};
             break;
         case DisplayBackend::Gtk:
-            a = {"-display", "gtk",
-                 "-window", "width=" + std::to_string(cfg.width) +
-                            ",height=" + std::to_string(cfg.height)};
+            a = {"-display", "gtk" + std::string(want_gl ? ",gl=on" : "")};
             break;
         case DisplayBackend::Headless:
             a = {"-display", "none"};
@@ -161,11 +162,15 @@ std::vector<std::string> QemuCommandBuilder::display(const InstanceConfig& cfg) 
 std::vector<std::string> QemuCommandBuilder::audio(const InstanceConfig& cfg) const {
     std::vector<std::string> a;
     if (!cfg.audio_enabled) return a;
-    // QEMU 8+ unified -audio. PipeWire first, PulseAudio fallback.
+    // QEMU unified -audio. PipeWire first, PulseAudio (pa) fallback.
+    // The in/out engine + device options are omitted; QEMU picks the default
+    // PipeWire/PulseAudio device. (QEMU 11 rejects the in.engines= keys.)
     a.push_back("-audio");
-    a.push_back("driver=" + cfg.audio_driver +
-                ",in.engines="",out.engines="",in.device=default,out.device=default");
-    // The guest still needs an HDA controller to consume the audio backend.
+    a.push_back("driver=" + cfg.audio_driver);
+    // The guest needs an HDA bus + controller to consume the audio backend.
+    // ich9-intel-hda provides the bus; hda-duplex the codec (in+out).
+    a.push_back("-device");
+    a.push_back("ich9-intel-hda");
     a.push_back("-device");
     a.push_back("hda-duplex");
     return a;

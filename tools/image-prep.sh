@@ -92,7 +92,7 @@ if [[ "$MODE" != "verify" ]]; then
         log "Base image already exists: $BASE_QCOW2 (reusing)"
     else
         log "Creating read-only base qcow2 (16 GiB, sparse) ..."
-        qemu-img create -f qcow2 -o backing_file="" "$BASE_QCOW2" 16G
+        qemu-img create -f qcow2 "$BASE_QCOW2" 16G
         chmod a-w "$BASE_QCOW2"    # read-only base: instances only write overlays
         log "Base image ready: $BASE_QCOW2"
     fi

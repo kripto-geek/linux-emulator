@@ -65,9 +65,10 @@ done
 # Paths
 # ---------------------------------------------------------------------------
 XDG_DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
+XDG_RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 INST_DIR="$XDG_DATA/droidforge/$INSTANCE"
 OVERLAY="$INST_DIR/overlay.qcow2"
-QMP_SOCK="$XDG_RUNTIME_DIR/droidforge/$INSTANCE/qmp.sock"
+QMP_SOCK="$XDG_RUNTIME/droidforge/$INSTANCE/qmp.sock"
 PID_FILE="$INST_DIR/qemu.pid"
 
 mkdir -p "$INST_DIR"
@@ -107,7 +108,7 @@ ARGS=(
     -smp "cpus=$CORES,cores=$CORES,threads=1,sockets=1"
     -cpu host
     # Primary writable disk = overlay
-    -drive "file=$OVERLAY,if=virtio,format=qcow2,cache=none,aio=threads,detect_zeroes=on"
+    -drive "file=$OVERLAY,if=virtio,format=qcow2,cache=none,aio=threads"
 )
 
 # First boot: attach the ISO so the guest's GRUB offers "Install".
@@ -118,18 +119,24 @@ fi
 
 # GPU
 case "$GPU" in
-    virgl)  ARGS+=( -device "virtio-gpu-gl-pci,mem-mb=512,max_scanouts=3,gl=max" ) ;;
-    virtio) ARGS+=( -device "virtio-gpu-pci,mem-mb=512,max_scanouts=3" ) ;;
+    virgl)  ARGS+=( -device "virtio-gpu-gl-pci" ) ;;
+    virtio) ARGS+=( -device "virtio-gpu-pci" ) ;;
     venus)  ARGS+=( -device "virtio-vulkan-pci,mem-mb=512" ) ;;
     *) echo "unknown gpu: $GPU" >&2; exit 2 ;;
 esac
 
-# Display (SDL window sized to the guest resolution)
-ARGS+=( -display sdl -window "width=$WIDTH,height=$HEIGHT" )
+# Display backend. QEMU 11 has no -window flag; the SDL window sizes to the
+# guest framebuffer. GL is enabled on the backend for virgl (virtio-gpu-gl-pci).
+case "$GPU" in
+    virgl) ARGS+=( -display "sdl,gl=on" ) ;;
+    *)     ARGS+=( -display sdl ) ;;
+esac
 
 # Audio
 if [[ "$AUDIO" -eq 1 ]]; then
-    ARGS+=( -audio "driver=pipewire,in.engines=,out.engines=,in.device=default,out.device=default" -device hda-duplex )
+    # QEMU 11 unified -audio; in/out engine+device keys are rejected, so use
+    # the minimal form. The guest needs an HDA bus (ich9-intel-hda) + codec.
+    ARGS+=( -audio driver=pipewire -device ich9-intel-hda -device hda-duplex )
 fi
 
 # Network: slirp + host-forward ADB

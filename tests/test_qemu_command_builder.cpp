@@ -74,7 +74,7 @@ TEST(QemuCommandBuilder, DiskIsOverlayWithDirectCache) {
     auto argv = defaults();
     EXPECT_EQ(valueAfter(argv, "-drive"),
               "file=/var/lib/droidforge/pubg1/overlay.qcow2,"
-              "if=virtio,format=qcow2,cache=none,aio=threads,detect_zeroes=on");
+              "if=virtio,format=qcow2,cache=none,aio=threads");
 }
 
 TEST(QemuCommandBuilder, IsoAttachedOnFirstBoot) {
@@ -99,8 +99,9 @@ TEST(QemuCommandBuilder, NoIsoOnSubsequentBoot) {
 
 TEST(QemuCommandBuilder, VirglGpuDevice) {
     auto argv = defaults();
-    EXPECT_EQ(valueAfter(argv, "-device"),
-              "virtio-gpu-gl-pci,mem-mb=512,max_scanouts=3,gl=max");
+    // QEMU 11: no `gl`/`mem-mb`/`max_scanouts` properties on the device.
+    // GL is enabled on the display backend (see SdlDisplayBackend).
+    EXPECT_EQ(valueAfter(argv, "-device"), "virtio-gpu-gl-pci");
 }
 
 TEST(QemuCommandBuilder, GpuFallbackToVirtioGpu) {
@@ -110,21 +111,36 @@ TEST(QemuCommandBuilder, GpuFallbackToVirtioGpu) {
     cfg.gpu_mode      = GpuMode::VirtioGpu;
     QemuCommandBuilder builder;
     auto argv = builder.build(cfg);
-    EXPECT_EQ(valueAfter(argv, "-device"),
-              "virtio-gpu-pci,mem-mb=512,max_scanouts=3");
+    EXPECT_EQ(valueAfter(argv, "-device"), "virtio-gpu-pci");
 }
 
-TEST(QemuCommandBuilder, SdlDisplayWithWindowSize) {
+TEST(QemuCommandBuilder, SdlDisplayBackend) {
     auto argv = defaults();
+    // Virgl GPU mode -> GL enabled on the SDL display backend.
+    EXPECT_EQ(valueAfter(argv, "-display"), "sdl,gl=on");
+    // QEMU 11 has no -window flag; the window sizes to the guest framebuffer.
+    for (size_t i = 0; i < argv.size(); ++i)
+        EXPECT_NE(argv[i], "-window");
+}
+
+TEST(QemuCommandBuilder, SdlNoGlWhenNotVirgl) {
+    droidforge::InstanceConfig cfg;
+    cfg.instance_id   = "a";
+    cfg.overlay_image = "/tmp/ov.qcow2";
+    cfg.gpu_mode      = GpuMode::VirtioGpu;
+    QemuCommandBuilder b;
+    auto argv = b.build(cfg);
     EXPECT_EQ(valueAfter(argv, "-display"), "sdl");
-    EXPECT_EQ(valueAfter(argv, "-window"), "width=1280,height=720");
 }
 
 TEST(QemuCommandBuilder, PipeWireAudioAndHda) {
     auto argv = defaults();
-    EXPECT_EQ(valueAfter(argv, "-audio"),
-              "driver=pipewire,in.engines=,out.engines=,"
-              "in.device=default,out.device=default");
+    // QEMU 11 unified -audio; in/out engine+device options omitted (QEMU
+    // rejects the in.engines= keys). PipeWire driver + HDA controller.
+    EXPECT_EQ(valueAfter(argv, "-audio"), "driver=pipewire");
+    // HDA bus + codec both present.
+    EXPECT_TRUE(std::any_of(argv.begin(), argv.end(),
+        [](const std::string& s) { return s == "ich9-intel-hda"; }));
     EXPECT_TRUE(std::any_of(argv.begin(), argv.end(),
         [](const std::string& s) { return s == "hda-duplex"; }));
 }

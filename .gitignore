@@ -5,3 +5,5 @@ images/*.img
 images/download.log
 *.o
 *.a
+build/
+images/_dl.sh
