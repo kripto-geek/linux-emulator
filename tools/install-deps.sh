@@ -25,22 +25,27 @@ PKGS=(
     android-tools        # adb + fastboot
 
     # Vulkan (guest GPU + Venus experiment)
+    # Note: on current Arch, the Mesa Vulkan ICD ships inside the `mesa`
+    # package (already a dep of mesa-utils/virglrenderer). There is no
+    # standalone `vulkan-mesa` package; only the implicit/layers variants.
     vulkan-icd-loader
-    vulkan-mesa
-    vulkan-radeon
-    vulkan-tools
+    vulkan-radeon            # AMD/Intel Vulkan ICD (Venus experiment)
+    vulkan-tools             # vulkaninfo / vulkan-compiler
 
     # Qt 6 UI
-    qt6-base
-    qt6-quick            # QML (if we go QML)
-    qt6-quickcontrols2
-    qt6-quick3d
-    qt6-declarative
+    # On this Arch build, QtQuick / QtQuick.Controls / the X11-extra and
+    # sql-sqlite components are merged into qt6-base + qt6-declarative,
+    # so there are no separate qt6-quick/qt6-quickcontrols2/qt6-x11extras/
+    # qt6-sql-sqlite packages.
+    qt6-base                 # core + widgets + X11 + sqlite driver
+    qt6-declarative          # QML runtime + QtQuick + QtQuick.Controls
+    qt6-quick3d              # optional 3D content
+    qt6-multimedia           # QoL: recording / audio capture
+    qt6-imageformats
+    qt6-svg
     qt6-5compat
-    qt6-wayland          # wayland platform plugin
-    qt6-x11extras        # x11 fallback
-    qt6-sql-sqlite
-    qt6-tools            # lrelease / qtdeploy
+    qt6-wayland              # wayland platform plugin
+    qt6-tools                # lrelease / qtdeploy / qmlformat
 
     # Build system
     cmake
@@ -52,8 +57,7 @@ PKGS=(
     fmt
 
     # Testing
-    gtest
-    gmock
+    gtest                    # gtest package bundles gmock on Arch
 
     # Wayland / input / keymap
     wayland
@@ -62,7 +66,8 @@ PKGS=(
     xkeyboard-config
 
     # Shared folder (virtiofs, Phase 3 QoL)
-    libfuse
+    # Note: the libfuse runtime is provided by `fuse3` on current Arch
+    # (there is no separate `libfuse` package).
     fuse3
     virtiofsd
 
