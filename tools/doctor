@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# DroidForge doctor - environment health check with actionable fixes
+#
+# Run as your normal (non-root) user:  tools/doctor
+# Exits 0 if everything needed for Phase 1 is green; non-zero otherwise.
+#
+# Checks:
+#   [req]  CPU virtualization flags (svm/vmx)
+#   [req]  /dev/kvm exists and is readable by current user
+#   [req]  user is in the 'kvm' group
+#   [req]  QEMU installed and KVM-enabled
+#   [req]  virglrenderer installed (host-side GL renderer)
+#   [req]  android-tools (adb)
+#   [opt]  GPU vendor + active GL renderer (virgl picks up the active one)
+#   [opt]  Wayland vs X11 session
+#   [req]  PipeWire running (audio)
+#   [opt]  CMake / Ninja / compiler toolchain
+#   [opt]  Qt 6 platform plugins
+#   [opt]  virtiofsd (shared folder, Phase 3)
+set -uo pipefail
+
+PASS=0
+WARN=0
+FAIL=0
+
+GREEN=$'\e[32m'; YELLOW=$'\e[33m'; RED=$'\e[31m'; NC=$'\e[0m'
+
+ok()   { echo "  ${GREEN}[ OK ]${NC} $1"; PASS=$((PASS+1)); }
+warn() { echo "  ${YELLOW}[WARN]${NC} $1"; WARN=$((WARN+1)); }
+err()  { echo "  ${RED}[FAIL]${NC} $1"; FAIL=$((FAIL+1)); }
+
+section() { echo; echo "=== $1 ==="; }
+
+section "CPU virtualization"
+FLAGS=$(grep -m1 'flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^(vmx|svm)$' | sort -u | tr '\n' ' ')
+if [[ -z "$FLAGS" ]]; then
+    err "No CPU virtualization flags (svm/vmx) found. Enable AMD-V / Intel VT-x in BIOS/UEFI."
+elif grep -qs svm /proc/cpuinfo; then
+    ok "AMD SVM virtualization enabled ($FLAGS)"
+else
+    ok "Intel VMX virtualization enabled ($FLAGS)"
+fi
+AVX=$(grep -m1 'flags' /proc/cpuinfo | grep -oE '\bavx2?\b' | sort -u | tr '\n' ' ')
+if [[ -n "$AVX" ]]; then ok "CPU has AVX/AVX2 ($AVX)" ; else warn "CPU lacks AVX - some Android apps may run slower"; fi
+echo "  cpu: $(grep -m1 'model name' /proc/cpuinfo | sed 's/^.*: //')  ($(nproc) cores)"
+
+section "KVM access"
+if [[ ! -e /dev/kvm ]]; then
+    err "/dev/kvm does not exist. Load kernel module:  sudo modprobe kvm $( (grep -qs svm /proc/cpuinfo && echo kvm_amd) || echo kvm_intel )"
+else
+    ok "/dev/kvm exists"
+    if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+        ok "current user can read/write /dev/kvm"
+    else
+        err "current user cannot access /dev/kvm. Fix:  sudo usermod -aG kvm \$USER  then re-login (or:  sg kvm -c '...')."
+    fi
+fi
+KVMGROUP=$(getent group kvm)
+if [[ -n "$KVMGROUP" ]]; then
+    MEMBERS=$(echo "$KVMGROUP" | cut -d: -f4)
+    if [[ ",$MEMBERS," == *",$USER,"* ]]; then
+        ok "user '$USER' is in kvm group"
+    else
+        warn "user '$USER' not in kvm group (you may still have access via ACL). Add:  sudo usermod -aG kvm \$USER"
+    fi
+else
+    warn "no 'kvm' group on this system (ACL-based access is fine if /dev/kvm is readable)"
+fi
+
+section "QEMU"
+if command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    QV=$(qemu-system-x86_64 --version | head -1)
+    ok "$QV"
+    # KVM support is a compile-time feature; verify the accelerator is present.
+    if qemu-system-x86_64 --help 2>&1 | grep -q 'kvm'; then
+        ok "KVM accelerator available in this QEMU build"
+    else
+        err "KVM accelerator not present in this QEMU build. Install:  sudo pacman -S qemu-full"
+    fi
+else
+    err "qemu-system-x86_64 not found. Install:  sudo pacman -S qemu-full"
+fi
+if command -v qemu-img >/dev/null 2>&1; then
+    ok "qemu-img: $(qemu-img --version | head -1)"
+else
+    err "qemu-img not found (needed for base/overlay images). Part of qemu-full."
+fi
+# virtio-gpu-gl-pci is what we ship for virgl; it needs the -vga flag to be parseable.
+if command -v qemu-system-x86_64 >/dev/null 2>&1 && \
+   qemu-system-x86_64 -help 2>&1 | grep -q 'virtio-gpu-gl-pci'; then
+    ok "QEMU exposes -device virtio-gpu-gl-pci (virgl path)"
+else
+    warn "could not confirm virtio-gpu-gl-pci in QEMU help - will probe at runtime"
+fi
+
+section "virglrenderer (host GL for guest GPU)"
+if command -v virglrenderer >/dev/null 2>&1 || pkg-config --exists virglrenderer 2>/dev/null; then
+    if pkg-config --exists virglrenderer 2>/dev/null; then
+        ok "virglrenderer $(pkg-config --modversion virglrenderer) (pc file present)"
+    else
+        ok "virglrenderer binary present"
+    fi
+else
+    err "virglrenderer not installed. Guest GPU will fall back to software rendering.  sudo pacman -S virglrenderer"
+fi
+
+section "adb (control channel)"
+if command -v adb >/dev/null 2>&1; then
+    ok "adb $(adb version | head -1)"
+else
+    err "adb not found. Install:  sudo pacman -S android-tools"
+fi
+
+section "GPU"
+VENDOR=$(lspci 2>/dev/null | grep -iE 'vga|3d|display' | head -2)
+if [[ -n "$VENDOR" ]]; then
+    while IFS= read -r line; do echo "  $line"; done <<< "$VENDOR"
+fi
+GL_RENDERER=$(glxinfo 2>/dev/null | grep -E '^OpenGL renderer string' | awk '{print $4" "$5" "$6}')
+if [[ -n "$GL_RENDERER" ]]; then
+    ok "active GL renderer: $GL_RENDERER (virgl will use this)"
+    case "$GL_RENDERER" in
+        *NVIDIA*)
+            echo "  note: proprietary NVIDIA driver is active. virglrenderer (Mesa) works via the NVIDIA DRI3/GL context."
+            echo "        For the Venus (Vulkan) experiment later:  sudo pacman -S nvidia-utils (Vulkan ICD already present: nvidia_icd.json)"
+            ;;
+        *Mesa*|*Radeon*|*AMD*)
+            ok "Mesa/AMD GPU - good virgl support, and Vulkan ICD (vulkan-radeon) is available for the Venus experiment."
+            ;;
+        *)
+            echo "  note: unrecognised GL renderer '$GL_RENDERER' - virgl should still work if it has a DRI3 context."
+            ;;
+    esac
+else
+    warn "could not determine active GL renderer (glxinfo missing?  sudo pacman -S mesa-utils)"
+fi
+
+section "Session / display"
+SESS="${XDG_SESSION_TYPE:-unknown}"
+echo "  XDG_SESSION_TYPE=$SESS   WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-<unset>}   DISPLAY=${DISPLAY:-<unset>}"
+case "$SESS" in
+    wayland)
+        ok "Wayland session. Mouse capture will use pointer-constraints + relative-pointer (Phase 3)."
+        ;;
+    x11|xsession)
+        ok "X11 session. Mouse capture will use X11 pointer grab (Phase 3)."
+        ;;
+    *)
+        warn "unknown session type '$SESS' - input-capture behaviour untested."
+        ;;
+esac
+
+section "Audio (PipeWire)"
+if systemctl --user is-active --quiet pipewire 2>/dev/null; then
+    ok "PipeWire user service is active ($(wpctl status 2>/dev/null | grep -oE "pipewire-[0-9]+" | head -1))"
+elif command -v pactl >/dev/null 2>&1 && pactl info >/dev/null 2>&1; then
+    warn "PipeWire not active but PulseAudio-compatible server is reachable. QEMU may use -audio 'driver=pulse'."
+else
+    err "no PipeWire/PulseAudio reachable. Start it:  systemctl --user start pipewire"
+fi
+
+section "Build toolchain (optional until Phase 1 coding starts)"
+for t in cmake ninja g++ make; do
+    if command -v "$t" >/dev/null 2>&1; then
+        ok "$t: $(command -v $t)"
+    else
+        [[ "$t" == "g++" || "$t" == "cmake" || "$t" == "ninja" ]] && warn "$t missing (sudo pacman -S base-devel cmake ninja)"
+    fi
+done
+for pkg in qt6-base qt6-wayland; do
+    if pacman -Qi "$pkg" >/dev/null 2>&1; then
+        ok "installed: $pkg $(pacman -Qi "$pkg" | awk -F': ' '/^Version/{print $2}')"
+    else
+        warn "$pkg not installed (sudo pacman -S $pkg) - needed for the Qt UI, not for Phase 1 boot."
+    fi
+done
+
+section "virtiofsd (shared folder, Phase 3)"
+if command -v virtiofsd >/dev/null 2>&1; then
+    ok "virtiofsd present ($(command -v virtiofsd))"
+else
+    warn "virtiofsd missing (sudo pacman -S virtiofsd) - shared-folder feature is Phase 3."
+fi
+
+echo
+echo "============================================================"
+printf "  DroidForge doctor summary:  ${GREEN}%d passed${NC},  ${YELLOW}%d warnings${NC},  ${RED}%d failures${NC}\n" "$PASS" "$WARN" "$FAIL"
+echo "============================================================"
+
+if [[ "$FAIL" -gt 0 ]]; then
+    echo
+    echo "FAILURES FOUND - fix the [FAIL] items above before continuing."
+    exit 1
+fi
+if [[ "$WARN" -gt 0 ]]; then
+    echo
+    echo "All required items passed. Warnings above are optional / non-blocking for Phase 1."
+    exit 0
+fi
+echo
+echo "All checks passed. Ready to proceed."
+exit 0
