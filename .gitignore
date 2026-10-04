@@ -1,0 +1,7 @@
+build/
+images/*.iso
+images/*.qcow2
+images/*.img
+images/download.log
+*.o
+*.a
