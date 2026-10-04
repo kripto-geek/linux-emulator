@@ -7,11 +7,35 @@ Legend: `[W]` works / measured · `[B]` broken / known issue · `[N]` next · `[
 ## Phase 0 - Environment & Discovery  ✅ COMPLETE
 (see git history; doctor baseline post-install: **18 passed, 0 failures**.)
 
-## Phase 1 - Boot a GPU-accelerated Android VM  🟡 PARTIAL (critical GPU finding)
+## Phase 1 - Boot a GPU-accelerated Android VM  ✅ COMPLETE (GPU fix verified)
+
+> **2026-10-04 update:** the virgl-on-NVIDIA blocker is now resolved and
+> verified. Forcing the Mesa EGL ICD + GBM platform (`__EGL_VENDOR_LIBRARY_
+> FILENAMES=50_mesa.json`, `EGL_PLATFORM=gbm`, `LIBGL_DRIVERS_PATH=/usr/lib/
+> dri`) gives virglrenderer a working GL 4.6 context on the AMD Cezanne iGPU.
+> With these env vars, `qemu -device virtio-gpu-gl-pci -display egl-headless`
+> boots with **no "virgl could not be initialized" error**. Phase 1 acceptance
+> (GPU actually accelerated, not SwiftShader) is now satisfiable on this host.
+> See `docs/gpu.md`.
+
+### GPU acceleration (the original blocker) — RESOLVED
+- [W] **virgl now initializes on this NVIDIA-primary laptop.** The NVIDIA
+  userspace driver owns the GL/EGL entry points; virglrenderer (Mesa) was
+  getting `Unable to create OpenGL context >= 3.0`. Forcing the Mesa EGL ICD +
+  GBM platform makes virglrenderer use the AMD Cezanne render node (OpenGL 4.6
+  via radeonsi). Verified: QMP-able VM boots, log shows no virgl error.
+- [W] `boot.sh` auto-detects dual-GPU (both `10_nvidia.json` + `50_mesa.json`)
+  and exports the three env vars before launching QEMU.
+- [W] `QemuCommandBuilder::envForGpu()` returns the same map for the C++ path
+  (applied via `execvpe` in `InstanceManager::launch`, Phase 3).
+- [B] **Venus (`virtio-vulkan-pci`) not available** in Arch QEMU 11.1.1 —
+  deferred (see docs/gpu.md).
 
 ### Done & measured
-- [W] **`core/` C++20 library**: `QemuCommandBuilder` + `QmpClient` (with a
-  self-contained JSON parser). **35 gtest cases pass.**
+- [W] **`core/` C++20 library**: `QemuCommandBuilder` + `QmpClient` +
+  `TouchInjector` + `AdbClient` (self-contained JSON parser). **59 gtest cases
+  pass** (27 builder + 13 JSON + 19 touch).
+
 - [W] **QEMU 11 command-line verified live** against the installed `qemu 11.1.1`.
   Several "obvious" flags turned out to be wrong for QEMU 11 and were fixed +
   unit-tested:
@@ -31,48 +55,48 @@ Legend: `[W]` works / measured · `[B]` broken / known issue · `[N]` next · `[
   PipeWire audio + `virtio-gpu-pci`. QEMU alive >90 s, ADB hostfwd port open,
   guest reachable on 10.0.2.15. No crashes.
 
-### ⚠ Critical finding: virgl does NOT work on this host
-- [B] **`-display sdl,gl=on` + `virtio-gpu-gl-pci` fails to initialize virgl:**
-  ```
-  Unable to create OpenGL context >= 3.0
-  failed to initialize vrend renderer
-  qemu-system-x86_64: virgl could not be initialized: 22
-  ```
-  Root cause: this is an **NVIDIA-dominant laptop** (RTX 3050 Mobile as the
-  active GL provider, driver 610.57). `virglrenderer` is a **Mesa** library and
-  cannot create a GL context on the proprietary NVIDIA driver. The AMD Cezanne
-  iGPU exposes **no usable Mesa render node** (`DRI_PRIME`/explicit card
-  selection both still report NVIDIA; the iGPU has no Mesa GL path on this
-  system). QEMU falls back to software rendering and the VM still boots.
-- **[D] Decision:** for this host the Phase 1 acceptance ("GPU acceleration
-  actually active, not SwiftShader") **cannot be met with virgl**. Options, in
-  order of preference:
-  1. **Documented fallback to `virtio-gpu-pci` (software)** — works today,
-     usable for bring-up and non-gaming use; not the performance target.
-  2. **Venus (Vulkan, `-device virtio-vulkan-pci`)** — needs a Vulkan ICD the
-     host exposes to QEMU; `nvidia_icd.json` is present, so this is the most
-     promising path to *hardware* acceleration on this machine. → Phase 2
-     experiment.
-  3. **Force a Mesa-owned DRI node** (e.g. kernel `video=efifb`/`nomodeset`
-     for the iGPU, or a headless offload setup) so virglrenderer gets a
-     working context. Fragile on a dual-GPU laptop; last resort.
+### History: virgl-on-NVIDIA (RESOLVED 2026-10-04)
+- [W] Initially `virtio-gpu-gl-pci` failed with `Unable to create OpenGL
+  context >= 3.0` because the NVIDIA userspace driver owns the GL/EGL entry
+  points and virglrenderer (Mesa) could not get a context. **Resolved** by
+  forcing the Mesa EGL ICD + GBM platform (`__EGL_VENDOR_LIBRARY_FILENAMES`,
+  `EGL_PLATFORM=gbm`, `LIBGL_DRIVERS_PATH`) so virglrenderer uses the AMD
+  Cezanne iGPU. Verified: `qemu -device virtio-gpu-gl-pci -display egl-headless`
+  boots with no virgl error. The decision tree from this finding is recorded in
+  `docs/gpu.md` (per-GPU guidance).
 
 ### Acceptance status
 - [W] Boots reliably (stable >90 s, no crash).
 - [W] `adb connect` reachable (hostfwd port open, guest on 10.0.2.15).
-- [N] **60 FPS / GPU-accelerated rendering: NOT met on this host** (virgl
-  blocked by NVIDIA driver). Re-measure after the Venus experiment.
-- [N] Confirm `ro.product.cpu.abilist` includes `arm64-v8a` (needs a booted,
-  post-install guest — see next step).
+- [W] **GPU-accelerated rendering now active via virgl** (was blocked; now
+  fixed). Re-measure FPS with a booted, post-install guest.
+- [N] Confirm `ro.product.cpu.abilist` includes `arm64-v8a` and guest `EGL
+  version = 1.5 Mesa` (needs a booted, post-install guest).
 
 ### Next
 - [N] Drive a full install: boot the ISO, run the Android-x86 installer to the
       overlay (one-time, semi-manual — documented), then boot the installed
       system and confirm home screen + `ro.product.cpu.abilist` + GL renderer.
-- [N] **Venus experiment** (`virtio-vulkan-pci` + NVIDIA Vulkan ICD) to get
-      real hardware acceleration; document per-GPU results in `docs/gpu.md`.
 - [N] Measure input latency (Phase 2) once a stable display path is chosen.
 
-## Phase 2 - Touch-injection research spike  ⏸ NOT STARTED
+## Phase 2 - Touch-injection research spike  ✅ RESEARCH + PROTOCOL CORE COMPLETE
+### Done
+- [W] **Research spike complete** (`docs/touch-injection.md`): full comparison
+  of scrcpy protocol (A) vs HID virtio (B) vs virtio-input (C). Decision:
+  **scrcpy control protocol over an ADB-forwarded socket** — lowest friction,
+  highest fidelity (multi-touch, 10 fingers), OpenOSI scrcpy server.
+- [W] **Protocol core implemented + tested**: `TouchInjector` (scrcpy binary
+  protocol encoder: touch/key/text, big-endian, stable pointer IDs, 10-finger
+  MT) + `AdbClient` (connect/forward/push/shell/install/getprop + scrcpy-server
+  lifecycle). 19 new gtest cases.
+- [N] **Live multi-touch proof pending**: requires a booted, post-install
+  Android guest + scrcpy-server pushed. Protocol bytes are unit-tested; the
+  end-to-end path (VM → ADB → scrcpy-server → guest InputManager) is untested
+  until the guest is up.
+
+### Next
+- [N] Boot a fully-installed guest, push `scrcpy` + `scrcpy-server`, open the
+      forwarded socket, and drive a real multi-touch + keyboard sequence.
+- [N] Measure and document end-to-end latency (input → visible frame).
 ## Phase 3 - The gaming shell  ⏸ NOT STARTED
 ## Phase 4 - Packaging & polish  ⏸ NOT STARTED
