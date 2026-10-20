@@ -1,0 +1,95 @@
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---------------------------------------------------------------------------
+# Runtime state (created per instance at launch)
+# ---------------------------------------------------------------------------
+/instances/
+qemu.pid
+*.log
+
+# ---------------------------------------------------------------------------
+# VM images, ISOs and archives (multi-GB, never committed)
+# ---------------------------------------------------------------------------
+/images/
+*.qcow2
+*.img
+*.iso
+*.7z
+*.zip
+*.vmdk
+*.vhd
+*.vdi
+*.raw
+*.apk
+
+# The boot initramfs is a small, required source artifact (see THIRD_PARTY.md)
+!/boot/androidx86_64/initrd.img
+
+# ---------------------------------------------------------------------------
+# Artifacts extracted from the proprietary Windows MEmu Play installer.
+# These are local reverse-engineering reference material only and are not
+# redistributed with this project.
+# ---------------------------------------------------------------------------
+/MEmu*
+/Memu*
+/memuc.exe
+/memu.exe
+/libmemu.dll
+/libEGL*
+/libOpenglSystemCommon.so
+/adbd
+/ramdisk
+/ramdisk_root/
+/systemd
+/boot.vhd
+/*.vmdk
+/8.7z
+/2.img
+/4.img
+/*.apk
+/ss.apk
+/build.prop
+/cmdline
+/grub.cfg
+/hyperv.json
+/manifest.xml
+/*.rc
+/init.ranchu-net.sh
+/kernel
+/kernel-hv
+/memu_contents.txt
+/drawer.png
+/resources/
+/run
+
+# ---------------------------------------------------------------------------
+# Built helpers (rebuild from source with `lemu-touch` bootstrap)
+# ---------------------------------------------------------------------------
+/bin/lemu-touch
+*.o
+*.a
+*.so
+*.dll
+*.fd
+*.exe
+
+# ---------------------------------------------------------------------------
+# Editors / OS
+# ---------------------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+.DS_Store

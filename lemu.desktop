@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Lemu (MEmu Play for Linux)
+Comment=MEmu Android Gaming Emulator reconstructed for Arch Linux / Omarchy
+Exec=/home/k/Projects/lemu/bin/lemu
+Icon=utilities-terminal
+Terminal=false
+Type=Application
+Categories=Game;Emulator;Utility;
+Keywords=android;emulator;memu;lemu;gaming;

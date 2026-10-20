@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lemu"
+version = "0.1.0"
+description = "MEmu Play reconstructed for Linux - Android 9 gaming emulator on KVM/QEMU"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Kumar Gaurav (kripto-geek)" }]
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+    "Environment :: X11 Applications",
+    "Topic :: Games/Entertainment :: Emulators",
+]
+dependencies = []
+
+[project.scripts]
+lemuc = "lemu.cli:main"
+lemu = "lemu.entry:main"
+lemu-gui = "lemu.gui:main"
+
+[tool.setuptools.packages.find]
+include = ["lemu*"]
