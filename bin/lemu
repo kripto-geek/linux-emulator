@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+"""Lemu main entry point: launches GUI if no args, otherwise delegates to lemuc."""
+import subprocess
+import sys
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+if len(sys.argv) > 1:
+    cmd = [str(BASE_DIR / "bin" / "lemuc")] + sys.argv[1:]
+    sys.exit(subprocess.call(cmd))
+else:
+    cmd = [str(BASE_DIR / "bin" / "lemu-gui")]
+    sys.exit(subprocess.call(cmd))
