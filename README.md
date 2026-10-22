@@ -262,6 +262,19 @@ Houdini initialises, and the installed ARM game runs.
 
 Or search for **"Lemu"** in the Hyprland / Omarchy launcher (Rofi / Wofi).
 
+System dependencies (not pip packages): **tk** and **python-pillow** provide the
+Tk runtime and the screenshot support for the visual keymap editor:
+
+```bash
+sudo pacman -S tk python-pillow
+```
+
+The Keymapper window has a **Visual Editor…** button that opens a GameLoop-style
+editor directly on a live screencap of the guest: pick tap / swipe / hold /
+key-event, press the host key, and click (or drag) on the frame to place the
+binding — no hand-typed coordinates.  Markers are draggable, re-bindable and
+removable, and every change is written straight into the selected scheme.
+
 ---
 
 ## 🎮 Keyboard mapping (touch-only games)
@@ -534,5 +547,14 @@ lemu/
 ### Known limitations
 
 - Apps that require Google Play Services / Play Store are not preinstalled.
-- DNS resolution for apps is not configured (the guest has no resolver), so
-  network-dependent features inside games may fail even though `wifi_eth` is up.
+- **Guest GL is software-only on the stock Android-x86 image** — it ships only
+  `libGLES_android.so` (no Mesa / dri / gralloc hardware stack), so 3D games
+  render on the CPU and are frame-rate capped by your cores regardless of the
+  `gpu` setting. The `virgl` mode activates automatically with a guest that has
+  a Mesa client stack (e.g. Bliss OS 16). Lowering guest resolution and freeing
+  host CPU headroom are the practical levers meanwhile.
+- **Display device**: the default VGA device is `vmware` (vmware-svga). With
+  `std`/`virtio` the host window presents the guest framebuffer with the red and
+  blue channels swapped on this image (verified against guest screencaps — the
+  screencap itself is always correct); vmware-svga blits with the right byte
+  order. Set `vga` back to `std` if your guest comes out correct anyway.
