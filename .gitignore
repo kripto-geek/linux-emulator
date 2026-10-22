@@ -28,6 +28,9 @@ qemu.pid
 *.img
 *.iso
 *.7z
+*.xapk
+# cross-app shader cache QEMU/graphics stack drop at the repo root
+/GLCache/
 *.zip
 *.vmdk
 *.vhd
