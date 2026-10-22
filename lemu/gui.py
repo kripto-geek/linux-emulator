@@ -13,6 +13,7 @@ Key handling comes in two flavours, and the difference matters for gaming:
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import queue
@@ -21,6 +22,11 @@ import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
+
+try:
+    from PIL import Image, ImageTk
+except ImportError:          # degraded mode: visual editor shows a plain canvas
+    Image = ImageTk = None
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
@@ -237,6 +243,544 @@ class GestureDialog(tk.Toplevel):
         self.destroy()
 
 
+
+#: Tk ``keysym`` → evdev ``KEY_*`` name used in keymap.json.
+_KEYSYM_MAP = {
+    "Left": "KEY_LEFT", "Right": "KEY_RIGHT", "Up": "KEY_UP", "Down": "KEY_DOWN",
+    "space": "KEY_SPACE", "Return": "KEY_ENTER", "Escape": "KEY_ESC", "Tab": "KEY_TAB",
+    "BackSpace": "KEY_BACKSPACE", "Delete": "KEY_DELETE", "Insert": "KEY_INSERT",
+    "Home": "KEY_HOME", "End": "KEY_END", "Prior": "KEY_PAGEUP", "Next": "KEY_PAGEDOWN",
+    "Shift_L": "KEY_LEFTSHIFT", "Shift_R": "KEY_RIGHTSHIFT",
+    "Control_L": "KEY_LEFTCTRL", "Control_R": "KEY_RIGHTCTRL",
+    "Alt_L": "KEY_LEFTALT", "Alt_R": "KEY_RIGHTALT",
+    "comma": "KEY_COMMA", "period": "KEY_DOT", "slash": "KEY_SLASH",
+    "minus": "KEY_MINUS", "equal": "KEY_EQUAL", "grave": "KEY_GRAVE",
+    "bracketleft": "KEY_LEFTBRACE", "bracketright": "KEY_RIGHTBRACE",
+    "semicolon": "KEY_SEMICOLON", "apostrophe": "KEY_APOSTROPHE",
+    "backslash": "KEY_BACKSLASH", "Print": "KEY_SYSRQ", "Pause": "KEY_PAUSE",
+    "Caps_Lock": "KEY_CAPSLOCK", "Scroll_Lock": "KEY_SCROLLLOCK",
+    "Num_Lock": "KEY_NUMLOCK", "KP_Enter": "KEY_KPENTER", "KP_Add": "KEY_KPPLUS",
+    "KP_Subtract": "KEY_KPMINUS", "KP_Multiply": "KEY_KPASTERISK",
+    "KP_Divide": "KEY_KPSLASH", "KP_Delete": "KEY_KPDOT", "KP_0": "KEY_KP0",
+    "KP_1": "KEY_KP1", "KP_2": "KEY_KP2", "KP_3": "KEY_KP3", "KP_4": "KEY_KP4",
+    "KP_5": "KEY_KP5", "KP_6": "KEY_KP6", "KP_7": "KEY_KP7", "KP_8": "KEY_KP8",
+    "KP_9": "KEY_KP9",
+}
+
+
+def _keysym_to_evkey(keysym: str) -> str:
+    """Translate a Tk keysym into the evdev name the keymapper reports."""
+    if keysym in _KEYSYM_MAP:
+        return _KEYSYM_MAP[keysym]
+    if len(keysym) == 1 and keysym.isupper() and keysym.isalpha():
+        return f"KEY_{keysym.upper()}"
+    if keysym.isdigit():
+        return f"KEY_{keysym}"
+    if keysym.startswith("F") and keysym[1:].isdigit() and 1 <= int(keysym[1:]) <= 12:
+        return f"KEY_{keysym.upper()}"
+    return "KEY_" + keysym.upper().replace("_L", "LEFT").replace("_R", "RIGHT")
+
+
+class VisualKeymapDialog(tk.Toplevel):
+    """GameLoop/MEmu-style visual keymap editor.
+
+    Shows a screencap of the running guest and lets you place bindings
+    directly on the game frame: pick a mode (tap / swipe / hold / key event),
+    press the host key you want, then click (or drag) on the screenshot.
+    Markers are draggable, re-bindable by clicking them and pressing a key,
+    and removable with the Del key.  Every change is written straight into
+    the scheme the parent dialog has selected.
+    """
+
+    CANVAS_W = 540
+    CANVAS_H = 406
+    MODE_COLORS = {
+        "tap": ACCENT_BLUE,
+        "hold": ACCENT_GREEN,
+        "swipe": ACCENT_PINK,
+        "keyevent": ACCENT_YELLOW,
+    }
+
+    def __init__(self, parent, vmid: int, editor: "KeymapDialog"):
+        super().__init__(parent)
+        self.vmid = vmid
+        self.editor = editor            # owning KeymapDialog (data + scheme)
+        self.adb = LemuADB(vmid)
+        self.title(f"Visual Keymap Editor - Instance {vmid}")
+        self.configure(bg=BG_DARK)
+        self.transient(parent)
+        self.resizable(True, True)
+
+        self.geometry_cache = None      # DisplayGeometry from the guest
+        self.img = None                 # PIL image of the screencap
+        self.img_w = self.img_h = 0
+        self.photo = None
+        self.scale_x = self.scale_y = 1.0
+        self.offset_x = self.offset_y = 0
+
+        self.mode = None                # active placement mode
+        self.pending_key = None         # captured host key awaiting placement
+        self.awaiting = "key"           # "key" → then "place"
+        self.selected = None            # (key, action) being dragged
+        self.drag_last = None
+        self.auto_job = None
+
+        self._build_ui()
+        self._refresh_frame()
+        self.bind("<Key>", self._on_key_capture)
+        self.bind("<Delete>", self._on_delete)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+
+    # -- construction ------------------------------------------------------
+    def _build_ui(self) -> None:
+        head = tk.Frame(self, bg=BG_DARK, padx=12, pady=8)
+        head.pack(fill=tk.X)
+        tk.Label(head, text="VISUAL KEYMAP", fg=ACCENT_BLUE, bg=BG_DARK,
+                 font=("Sans", 11, "bold")).pack(side=tk.LEFT)
+        self.target_lbl = tk.Label(head, text="", fg=ACCENT_YELLOW, bg=BG_DARK,
+                                   font=("Sans", 9))
+        self.target_lbl.pack(side=tk.LEFT, padx=14)
+        tk.Button(head, text="⟳ Refresh frame", command=self._refresh_frame,
+                  bg=BG_CARD, fg=FG_LIGHT, relief="flat", padx=10, pady=4,
+                  cursor="hand2", bd=0, font=("Sans", 9)).pack(side=tk.RIGHT)
+        self.auto_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(head, text="auto", variable=self.auto_var, command=self._toggle_auto,
+                       bg=BG_DARK, fg=FG_MUTED, selectcolor=BG_CARD,
+                       activebackground=BG_DARK, activeforeground=FG_LIGHT,
+                       font=("Sans", 8), highlightthickness=0).pack(side=tk.RIGHT, padx=6)
+
+        tools = tk.Frame(self, bg=BG_DARK, padx=12, pady=4)
+        tools.pack(fill=tk.X)
+
+        def tbtn(text, mode, col):
+            btn = tk.Button(tools, text=text, command=lambda m=mode: self._start_mode(m),
+                            bg=col, fg="#11111b", font=("Sans", 9, "bold"),
+                            relief="flat", padx=12, pady=5, cursor="hand2", bd=0)
+            btn.pack(side=tk.LEFT, padx=4)
+            return btn
+
+        self.btn_tap = tbtn("🖱 Tap", "tap", ACCENT_BLUE)
+        self.btn_swipe = tbtn("↔ Swipe", "swipe", ACCENT_PINK)
+        self.btn_hold = tbtn("⏱ Hold", "hold", ACCENT_GREEN)
+        self.btn_keyevent = tbtn("⊗ Key Event", "keyevent", ACCENT_YELLOW)
+        tk.Button(tools, text="✕ Delete selected", command=self._on_delete,
+                  bg=ACCENT_RED, fg="#11111b", font=("Sans", 9, "bold"),
+                  relief="flat", padx=12, pady=5, cursor="hand2", bd=0
+                  ).pack(side=tk.RIGHT, padx=4)
+
+        wrap = tk.Frame(self, bg=BG_DARK)
+        wrap.pack(fill=tk.BOTH, expand=True, padx=12)
+        self.canvas = tk.Canvas(wrap, width=self.CANVAS_W, height=self.CANVAS_H,
+                                bg="#000000", highlightthickness=1,
+                                highlightbackground=BORDER)
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+        self.canvas.bind("<Button-1>", self._on_press)
+        self.canvas.bind("<B1-Motion>", self._on_motion)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.canvas.bind("<Button-3>", self._on_right_click)
+        self.canvas.bind("<Double-Button-1>", self._on_double)
+
+        self.status = tk.Label(self, text="", fg=ACCENT_YELLOW, bg=BG_DARK,
+                               anchor=tk.W, font=("Sans", 9), justify=tk.LEFT)
+        self.status.pack(fill=tk.X, padx=14, pady=(0, 8))
+
+    # -- state helpers -----------------------------------------------------
+    def _bindings(self) -> dict:
+        """The binding map of the currently selected scheme (shared with parent)."""
+        dlg = self.editor
+        if dlg is not None and dlg.winfo_exists():
+            try:
+                return dlg._bindings()
+            except tk.TclError:
+                pass
+        # parent gone: fall back to direct file access with the parent's scheme
+        data = load_keymap(self.vmid)
+        target = getattr(self, "_fallback_target", None)
+        if target:
+            return (data.setdefault("profiles", {}).setdefault(self._fallback_target, {})
+                    .setdefault("bindings", {}))
+        return data.setdefault("bindings", {})
+
+    def _save(self) -> None:
+        dlg = self.editor
+        if dlg is not None and dlg.winfo_exists():
+            try:
+                dlg._save()
+                dlg._refresh()
+                return
+            except tk.TclError:
+                pass
+        data = load_keymap(self.vmid)
+        save_keymap(self.vmid, data)
+        self._redraw()
+
+    def _current_target(self) -> str:
+        dlg = self.editor
+        if dlg is not None and dlg.winfo_exists():
+            try:
+                return dlg.target
+            except tk.TclError:
+                pass
+        return getattr(self, "_fallback_target", None) or "default (all games)"
+
+    def _keymap_data(self) -> dict:
+        dlg = self.editor
+        if dlg is not None and dlg.winfo_exists():
+            try:
+                return dlg.data
+            except tk.TclError:
+                pass
+        return load_keymap(self.vmid)
+
+    def _set_keymap_data(self, data: dict) -> None:
+        dlg = self.editor
+        if dlg is not None and dlg.winfo_exists():
+            try:
+                dlg.data = data
+                return
+            except tk.TclError:
+                pass
+        save_keymap(self.vmid, data)
+
+    # -- frame capture -----------------------------------------------------
+    def _refresh_frame(self) -> None:
+        """Grab a fresh screencap + display geometry and redraw."""
+        import io
+        self.geometry_cache = None
+        try:
+            self.adb.connect()
+            proc = subprocess.run(
+                ["adb", "-s", self.adb.target, "exec-out", "screencap", "-p"],
+                capture_output=True, timeout=15.0)
+            if proc.returncode != 0 or not proc.stdout:
+                raise OSError(proc.stderr.decode(errors="replace") or "no output")
+            from lemu.keymap import probe_display
+            self.geometry_cache = probe_display(self.adb)
+            img = Image.open(io.BytesIO(proc.stdout)).convert("RGB")
+        except Exception as exc:                                       # noqa: BLE001
+            self.img = None
+            self.img_w = self.img_h = 0
+            self._set_status(f"Cannot capture frame (is the VM running?): {exc}")
+            self._redraw()
+            return
+
+        self.img = img
+        self.img_w, self.img_h = img.size
+        fit_w = self.canvas.winfo_width() or self.CANVAS_W
+        fit_h = self.canvas.winfo_height() or self.CANVAS_H
+        s = min(fit_w / self.img_w, fit_h / self.img_h)
+        self.scale_x = self.img_w * s
+        self.scale_y = self.img_h * s
+        self.offset_x = max(0, (fit_w - self.scale_x) / 2)
+        self.offset_y = max(0, (fit_h - self.scale_y) / 2)
+        canvas_img = img.resize((max(1, int(self.scale_x)), max(1, int(self.scale_y))),
+                                Image.LANCZOS)
+        self.photo = ImageTk.PhotoImage(canvas_img, master=self.canvas)
+        self._redraw()
+        self._toggle_auto()
+
+    def _toggle_auto(self) -> None:
+        if self.auto_job is not None:
+            self.after_cancel(self.auto_job)
+            self.auto_job = None
+        if self.auto_var.get() and self.winfo_exists():
+            self.auto_job = self.after(2500, self._auto_refresh)
+
+    def _auto_refresh(self) -> None:
+        if not self.winfo_exists():
+            return
+        # auto refresh only idles: never steal a frame mid-drag.
+        if self.drag_last is None and self.awaiting != "place":
+            self._capture_into()
+        self.auto_job = self.after(2500, self._auto_refresh)
+
+    def _capture_into(self) -> None:
+        """Lightweight frame refresh (no geometry re-probe)."""
+        subprocess_ok = True
+        try:
+            proc = subprocess.run(
+                ["adb", "-s", self.adb.target, "exec-out", "screencap", "-p"],
+                capture_output=True, timeout=15.0)
+            if proc.returncode != 0 or not proc.stdout:
+                raise OSError("no screencap output")
+            self.img = Image.open(io.BytesIO(proc.stdout)).convert("RGB")
+        except Exception:                                              # noqa: BLE001
+            subprocess_ok = False
+        if subprocess_ok and self.img is not None:
+            self.img_w, self.img_h = self.img.size
+            s = min((self.canvas.winfo_width() or self.CANVAS_W) / self.img_w,
+                    (self.canvas.winfo_height() or self.CANVAS_H) / self.img_h)
+            self.scale_x, self.scale_y = self.img_w * s, self.img_h * s
+            self.offset_x = max(0, ((self.canvas.winfo_width() or self.CANVAS_W) - self.scale_x) / 2)
+            self.offset_y = max(0, ((self.canvas.winfo_height() or self.CANVAS_H) - self.scale_y) / 2)
+            self.photo = ImageTk.PhotoImage(
+                self.img.resize((max(1, int(self.scale_x)), max(1, int(self.scale_y))),
+                                Image.LANCZOS), master=self.canvas)
+            self._redraw()
+
+    # -- coordinate conversion ---------------------------------------------
+    def _geo(self):
+        from lemu.keymap import DEFAULT_GEOMETRY
+        return self.geometry_cache or DEFAULT_GEOMETRY
+
+    def _cx(self, img_x: float) -> float:
+        return self.offset_x + img_x * (self.scale_x / max(self.img_w, 1))
+
+    def _cy(self, img_y: float) -> float:
+        return self.offset_y + img_y * (self.scale_y / max(self.img_h, 1))
+
+    def _ix(self, cx: float) -> float:
+        return (cx - self.offset_x) * max(self.img_w, 1) / max(self.scale_x, 1e-6)
+
+    def _iy(self, cy: float) -> float:
+        return (cy - self.offset_y) * max(self.img_h, 1) / max(self.scale_y, 1e-6)
+
+    def _to_canvas(self, nx: float, ny: float):
+        """Normalized (logical) → canvas pixel, honouring panel letterbox."""
+        g = self._geo()
+        px = g.left + min(max(nx, 0.0), 1.0) * max(g.right - g.left - 1, 1)
+        py = g.top + min(max(ny, 0.0), 1.0) * max(g.bottom - g.top - 1, 1)
+        fx = self.img_w * 1.0 / max(g.panel_w, 1)
+        fy = self.img_h * 1.0 / max(g.panel_h, 1)
+        return self._cx(px * fx), self._cy(py * fy)
+
+    def _to_norm(self, cx: float, cy: float):
+        g = self._geo()
+        px = self._ix(cx) * max(g.panel_w, 1) / max(self.img_w, 1)
+        py = self._iy(cy) * max(g.panel_h, 1) / max(self.img_h, 1)
+        nx = (px - g.left) / max(g.right - g.left - 1, 1)
+        ny = (py - g.top) / max(g.bottom - g.top - 1, 1)
+        return min(max(nx, 0.0), 1.0), min(max(ny, 0.0), 1.0)
+
+    # -- markers -----------------------------------------------------------
+    def _markers(self) -> list[tuple[str, dict]]:
+        return [(k, a) for k, a in sorted(self._bindings().items())
+                if isinstance(a, dict) and a.get("action")]
+
+    def _redraw(self) -> None:
+        c = self.canvas
+        c.delete("all")
+        if self.photo is not None:
+            c.create_image(self.offset_x, self.offset_y, image=self.photo, anchor="nw")
+        else:
+            c.create_text(c.winfo_width() / 2, c.winfo_height() / 2, fill=FG_MUTED,
+                          text="no frame - press ⟳ Refresh frame", font=("Sans", 10))
+            return
+        event_keys = [key for key, b in self._markers()
+                      if b.get("action") == "keyevent"]
+        for idx, (key, action) in enumerate(self._markers()):
+            kind = action.get("action")
+            color = self.MODE_COLORS.get(kind, FG_LIGHT)
+            is_sel = self.selected is not None and self.selected[0] == key
+            if kind == "keyevent":
+                # system keys have no position: stack them on the left edge
+                slot = event_keys.index(key)
+                x, y = self._to_canvas(0.03, 0.08 + 0.09 * slot)
+                c.create_rectangle(x - 34, y - 12, x + 34, y + 12, fill="#11111b",
+                                   outline=color if is_sel else BORDER,
+                                   width=2 if is_sel else 1)
+                c.create_text(x, y, fill=color, text=f"⌨ {KEY_LABELS.get(int(action.get('code', 0)), 'kbd')}",
+                              font=("Sans", 8, "bold"))
+                c.create_text(x, y + 16, fill=FG_MUTED, text=key.replace("KEY_", ""),
+                              font=("Sans", 7))
+            elif kind in ("tap", "hold"):
+                x, y = self._to_canvas(*action.get("at", [0.5, 0.5]))
+                if kind == "hold":
+                    c.create_oval(x - 15, y - 15, x + 15, y + 15, dash=(4, 3),
+                                  outline=color, width=2)
+                else:
+                    c.create_oval(x - 14, y - 14, x + 14, y + 14,
+                                  outline=color if is_sel else BORDER,
+                                  fill="#11111b", width=2 if is_sel else 2)
+                c.create_text(x, y, fill=color, text=key.replace("KEY_", ""),
+                              font=("Sans", 8, "bold"))
+            elif kind == "swipe":
+                x1, y1 = self._to_canvas(*action.get("from", [0.5, 0.5]))
+                x2, y2 = self._to_canvas(*action.get("to", [0.5, 0.5]))
+                c.create_line(x1, y1, x2, y2, fill=color, width=2 if is_sel else 2,
+                              arrow=tk.LAST, capstyle="round",
+                              dash=(6, 3) if is_sel else ())
+                mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+                c.create_oval(mx - 13, my - 13, mx + 13, my + 13,
+                              fill="#11111b", outline=color, width=2)
+                c.create_text(mx, my, fill=color, text=key.replace("KEY_", ""),
+                              font=("Sans", 8, "bold"))
+        self.target_lbl.configure(text=f"scheme: {self._current_target()}")
+
+    def _hit(self, cx: float, cy: float) -> str | None:
+        """Marker key whose handle is nearest within threshold."""
+        best, bestd = None, 26.0
+        for key, action in self._markers():
+            kind = action.get("action")
+            if kind == "keyevent":
+                continue
+            if kind in ("tap", "hold"):
+                x, y = self._to_canvas(*action.get("at", [0.5, 0.5]))
+                d = ((cx - x) ** 2 + (cy - y) ** 2) ** 0.5
+                if d < bestd:
+                    best, bestd = key, d
+            elif kind == "swipe":
+                x1, y1 = self._to_canvas(*action.get("from", [0.5, 0.5]))
+                x2, y2 = self._to_canvas(*action.get("to", [0.5, 0.5]))
+                mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+                for x, y in ((mx, my), (x1, y1), (x2, y2)):
+                    d = ((cx - x) ** 2 + (cy - y) ** 2) ** 0.5
+                    if d < bestd:
+                        best, bestd = key, d
+        return best
+
+    # -- modes + capture ---------------------------------------------------
+    def _start_mode(self, mode: str) -> None:
+        self.mode = mode
+        self.awaiting = "key"
+        self.pending_key = None
+        self.selected = None
+        self._set_status(f"{mode.upper()} selected - now press the HOST key on your "
+                         f"keyboard to bind (Esc cancels)…")
+
+    def _on_key_capture(self, event) -> None:
+        sym = event.keysym
+        if sym == "Escape" and self.awaiting == "key" and self.mode:
+            self.mode = None
+            self._set_status("cancelled.")
+            return "break"
+        if self.awaiting != "key" or sym in ("Shift_L", "Shift_R", "Alt_L", "Alt_R",
+                                             "Control_L", "Control_R", "Caps_Lock",
+                                             "Num_Lock", "Meta_L", "Meta_R"):
+            return None
+        key = _keysym_to_evkey(sym)
+        self.pending_key = key
+        self.awaiting = "place"
+        hint = ("now click (or drag for swipe) on the game frame"
+                if self.mode == "swipe" else
+                "now click on the game frame to place it")
+        self._set_status(f"BIND {self.mode.upper()} to {key} - {hint}")
+        return "break"
+
+    def _on_press(self, event) -> None:
+        if self.img is None:
+            return
+        if self.awaiting == "place" and self.pending_key and self.mode:
+            if self.mode == "swipe":
+                self.drag_start = self._to_norm(event.x, event.y)
+                self._set_status("swipe: drag to the target point and release…")
+                return
+            if self.mode == "keyevent":
+                self._ask_keycode(self.pending_key)
+                return
+            action = {"action": self.mode,
+                      "at": list(self._to_norm(event.x, event.y))}
+            if self.mode == "hold":
+                action["duration_ms"] = 600
+            bound_key = self.pending_key
+            self._bindings()[bound_key] = action
+            self._save()
+            self.mode = None
+            self.pending_key = None
+            self.awaiting = "key"
+            self._set_status(f"{bound_key} bound. Ready.")
+            return
+        # selection/drag on idle
+        hit = self._hit(event.x, event.y)
+        self.selected = (hit, self._bindings().get(hit)) if hit else None
+        self.drag_last = (event.x, event.y)
+        self._redraw()
+        if hit:
+            self._set_status(f"dragging {hit} - release to drop; press a key to "
+                             f"re-bind it; Del to remove; Esc/deselect to cancel")
+        else:
+            self._set_status("\u2003")
+
+    def _on_motion(self, event) -> None:
+        if not (self.selected and self.drag_last
+                and self.selected[1] is not None
+                and self.selected[1].get("action") != "keyevent"):
+            return
+        dx = event.x - self.drag_last[0]
+        dy = event.y - self.drag_last[1]
+        self.drag_last = (event.x, event.y)
+
+        def _shift(point, dx, dy):
+            x, y = self._to_canvas(*point)
+            return list(self._to_norm(x + dx, y + dy))
+
+        action = self.selected[1]
+        if action["action"] in ("tap", "hold"):
+            action["at"] = _shift(action.get("at", [0.5, 0.5]), dx, dy)
+        elif action["action"] == "swipe":
+            action["from"] = _shift(action.get("from", [0.5, 0.5]), dx, dy)
+            action["to"] = _shift(action.get("to", [0.5, 0.5]), dx, dy)
+        self._redraw()
+
+    def _on_release(self, event) -> None:
+        if self.mode == "swipe" and self.awaiting == "place" and self.pending_key:
+            start = getattr(self, "drag_start", None)
+            if start:
+                end = self._to_norm(event.x, event.y)
+                if abs(end[0] - start[0]) + abs(end[1] - start[1]) > 0.02:
+                    self._bindings()[self.pending_key] = {
+                        "action": "swipe", "from": list(start), "to": list(end),
+                        "duration_ms": 140,
+                    }
+                    self._save()
+                else:
+                    self._set_status("swipe too short - bind again")
+            self.mode, self.pending_key, self.awaiting = None, None, "key"
+            self._set_status("swipe bound. Ready.")
+            return
+        if self.selected:
+            self._save()
+            self._set_status(f"saved {self.selected[0]}")
+            self.selected = None
+            self._redraw()
+
+    def _on_right_click(self, event) -> None:
+        hit = self._hit(event.x, event.y)
+        if hit is None:
+            return
+        self._bindings().pop(hit, None)
+        self._save()
+        self._set_status(f"removed {hit}")
+
+    def _on_double(self, event) -> None:
+        hit = self._hit(event.x, event.y)
+        if hit is None:
+            return
+        self._start_mode(self._bindings()[hit].get("action") or "tap")
+        self._set_status(f"re-binding {hit} - press the new host key")
+        self.pending_key = hit          # reuse existing key when placing again
+
+    def _on_delete(self, _event=None) -> None:
+        hit = self.selected[0] if self.selected else None
+        if hit is None:
+            self._set_status("click a marker first, then press Del")
+            return
+        self._bindings().pop(hit, None)
+        self.selected = None
+        self._save()
+        self._set_status(f"removed {hit}")
+
+    def _ask_keycode(self, key: str) -> None:
+        labels = "  ".join(f"{c}={n}" for c, n in sorted(KEY_LABELS.items()))
+        dialog = simpledialog.askinteger(
+            "Android keycode", f"{key} sends which Android key event?\n{labels}",
+            parent=self, minvalue=0, maxvalue=300, initialvalue=4)
+        if dialog is not None:
+            self._bindings()[key] = {"action": "keyevent", "code": dialog}
+            self._save()
+        self.mode, self.pending_key, self.awaiting = None, None, "key"
+        self._set_status("Ready." if dialog is not None else "cancelled")
+
+    def _set_status(self, text: str) -> None:
+        self.status.configure(text=text)
+
+    def _close(self) -> None:
+        if self.auto_job is not None:
+            self.after_cancel(self.auto_job)
+            self.auto_job = None
+        self.destroy()
+
+
 class JsonEditorDialog(tk.Toplevel):
     """Raw editor for keymap.json - the escape hatch for full profile control."""
 
@@ -358,6 +902,7 @@ class KeymapDialog(tk.Toplevel):
 
         bbtn("Add Gesture…", self.on_add_gesture, ACCENT_BLUE).pack(side=tk.LEFT, padx=4)
         bbtn("Add Key Event…", self.on_add_keyevent, ACCENT_PINK).pack(side=tk.LEFT, padx=4)
+        bbtn("Visual Editor…", self.on_visual_editor, ACCENT_PINK).pack(side=tk.LEFT, padx=4)
         bbtn("Remove", self.on_remove, ACCENT_RED).pack(side=tk.LEFT, padx=4)
         bbtn("Reset Scheme", self.on_reset, ACCENT_YELLOW).pack(side=tk.LEFT, padx=4)
         bbtn("Edit JSON…", self.on_edit_json, BG_CARD, FG_LIGHT).pack(side=tk.LEFT, padx=4)
@@ -476,6 +1021,10 @@ class KeymapDialog(tk.Toplevel):
         self._bindings()[key] = {"action": "keyevent", "code": code}
         self._refresh()
         self._save()
+
+    def on_visual_editor(self) -> None:
+        editor = VisualKeymapDialog(self, self.vmid, self)
+        editor.focus_set()
 
     def on_remove(self) -> None:
         key = self._selected_key()
