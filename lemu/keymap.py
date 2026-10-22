@@ -115,12 +115,43 @@ _KEYMAP_COMMENT = (
 
 #: A worked example that also documents the profile mechanism: the generic
 #: defaults plus a pause key.  Subway Surfers itself drives the default scheme.
+_DEFAULT_FF_JOY = [0.164, 0.814]          # left-thumb joystick centre
+_FF_SWIPE = {"duration_ms": 160}
+
+#: Free Fire MAX (com.dts.freefiremax): WASD drive the dynamic joystick on the
+#: left, the right-hand cluster is taped where the buttons live on the
+#: 1024x768 frame (normalised, so resolution-independent).  Measured against
+#: the in-match layout; re-tune on the Visual Editor if the UI changes.
 DEFAULT_PROFILES = {
     "com.kiloo.subwaysurf": {
         "_comment": "Subway Surfers: generic lane swipes + P/Esc to pause.",
         "bindings": {
             "KEY_P":   {"action": "keyevent", "code": 4},
             "KEY_ESC": {"action": "keyevent", "code": 4},
+        },
+    },
+    "com.dts.freefiremax": {
+        "_comment": "Free Fire MAX: WASD joystick swipes + action cluster. "
+                    "P = Android BACK (opens the game menu).",
+        "bindings": {
+            "KEY_W":     {**_FF_SWIPE, "action": "swipe", "from": _DEFAULT_FF_JOY,
+                          "to": [0.164, 0.634]},
+            "KEY_A":     {**_FF_SWIPE, "action": "swipe", "from": _DEFAULT_FF_JOY,
+                          "to": [0.024, 0.814]},
+            "KEY_S":     {**_FF_SWIPE, "action": "swipe", "from": _DEFAULT_FF_JOY,
+                          "to": [0.164, 0.914]},
+            "KEY_D":     {**_FF_SWIPE, "action": "swipe", "from": _DEFAULT_FF_JOY,
+                          "to": [0.294, 0.814]},
+            "KEY_UP":    {**_FF_SWIPE, "action": "swipe", "from": _DEFAULT_FF_JOY,
+                          "to": [0.164, 0.634]},
+            "KEY_SPACE": {"action": "tap", "at": [0.949, 0.777]},   # jump
+            "KEY_C":     {"action": "tap", "at": [0.896, 0.926]},   # crouch
+            "KEY_Z":     {"action": "tap", "at": [0.949, 0.926]},   # prone
+            "KEY_F":     {"action": "hold", "at": [0.828, 0.781],
+                          "duration_ms": 260},                      # fire press
+            "KEY_Q":     {"action": "tap", "at": [0.739, 0.820]},   # quick items
+            "KEY_E":     {"action": "tap", "at": [0.159, 0.483]},   # sprint toggle
+            "KEY_P":     {"action": "keyevent", "code": 4},         # game menu
         },
     },
 }
