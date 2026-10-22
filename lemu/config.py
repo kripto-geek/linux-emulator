@@ -70,7 +70,24 @@ DEFAULT_INSTANCE_CONFIG = {
     "resolution_width": 1280,
     "resolution_height": 720,
     "dpi": 240,
-    "vga": "std",  # "std", "virtio", "vmware", "qxl"
+    "vga": "vmware",  # "std", "virtio", "vmware", "qxl"
+    # The vmware-svga device is the default because the std/virtio paths
+    # present the guest framebuffer with swapped R/B channels on this
+    # Android-x86 build (window shows blue where the guest rendered orange -
+    # measured against guest screencaps; screencap itself is always correct),
+    # while vmware-svga blits the framebuffer with the right byte order.
+    # GPU acceleration for the guest GL stack:
+    #   "sw"     - classic emulation display devices; the guest renders with
+    #              its software GL (works everywhere, slow for 3D games).
+    #   "virtio" - 2D-only virtio-gpu device (no -vga). Same guest software GL.
+    #   "virgl"  - virtio-gpu-gl-pci + virglrenderer so guest GLES calls run on
+    #              the host GPU. ONLY useful with a guest that ships a Mesa
+    #              client stack (dri/virtio). The Android-x86 9.0 image only
+    #              has libGLES_android.so, so virgl adds overhead with zero
+    #              benefit here. On NVIDIA-primary hosts, vm.py forces the
+    #              Mesa EGL vendor (VIRGL_ENV) so virglrenderer runs on the
+    #              AMD/Intel iGPU.
+    "gpu": "sw",
     "audio": True,
     "audio_backend": "pa",  # "pa", "pipewire", "alsa", or "none"
     # Extra 8250 UARTs exposed as /dev/ttyS1..N. The MEmu guest's init.rc chmods

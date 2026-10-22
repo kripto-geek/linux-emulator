@@ -25,6 +25,30 @@ from lemu.config import (
 )
 from lemu.deps import require_all
 
+#: virglrenderer is a Mesa library: it needs a Mesa EGL context. On hosts where
+#: the NVIDIA proprietary driver owns the compositor, the default EGL vendor is
+#: libEGL_nvidia, which does not expose the core profiles virgl needs
+#: ("Unable to create OpenGL context >= 3.0", "failed to initialize vrend").
+#: Forcing the Mesa vendor ICD and the GBM platform makes virgl run on the
+#: AMD/Intel iGPU render node instead - verified on this project's original
+#: test machine (RTX 3050 Mobile primary + Cezanne iGPU).
+VIRGL_ENV: dict[str, str] = {
+    "__EGL_VENDOR_LIBRARY_FILENAMES": "/usr/share/glvnd/egl_vendor.d/50_mesa.json",
+    "EGL_PLATFORM": "gbm",
+    "LIBGL_DRIVERS_PATH": "/usr/lib/dri",
+}
+
+
+def gpu_environment(gpu: str) -> dict[str, str] | None:
+    """Extra environment QEMU needs for a GPU mode, or None."""
+    return dict(VIRGL_ENV) if gpu == "virgl" else None
+
+
+def cpu_environment() -> dict:
+    """Base environment for the QEMU subprocess."""
+    return dict(os.environ)
+
+
 class LemuVM:
     def __init__(self, vmid: int = 0):
         self.vmid = vmid
@@ -84,6 +108,7 @@ class LemuVM:
 
         guest = self.config.get("guest", DEFAULT_GUEST)
         vga = self.config.get("vga", "std")
+        gpu = self.config.get("gpu", "sw")
         cpus = self.config.get("cpus", 4)
         mem = self.config.get("memory_mb", 4096)
         adb_port = self.config.get("adb_port", 21503 + (self.vmid * 10))
@@ -172,8 +197,25 @@ class LemuVM:
             if ports:
                 cmd += ["-device", "pci-serial-4x," + ",".join(ports)]
 
+        gpu_device: list[str] = []
+        if gpu == "virgl" and not headless:
+            # virgl needs a shareable guest RAM region the renderer can mmap:
+            # hand the machine a memfd backend and let the device use it.
+            gpu_device = [
+                "-object", f"memory-backend-memfd,share=on,id=machmem,size={mem}M",
+                "-machine", "pc,memory-backend=machmem",
+                "-device", "virtio-gpu-gl-pci",
+            ]
+            if display_arg != "none":
+                display_arg += ",gl=on"
+        elif gpu == "virtio":
+            gpu_device = ["-device", "virtio-gpu-pci"]
+
+        display_cmd = ["-vga", vga] if gpu == "sw" else []
+
         cmd += [
-            "-vga", vga,
+            *display_cmd,
+            *gpu_device,
             "-display", display_arg,
             "-qmp", f"unix:{self.qmp_sock},server,nowait",
             "-pidfile", str(self.pid_file),
@@ -197,6 +239,10 @@ class LemuVM:
             self.qmp_sock.unlink(missing_ok=True)
 
         cmd = self.build_command(headless=headless, display_backend=display_backend)
+        gpu = self.config.get("gpu", "sw")
+        env = os.environ.copy()
+        if gpu == "virgl":
+            env.update(VIRGL_ENV)
 
         print(f"[*] Launching Lemu instance {self.vmid} ({self.config.get('name')})...")
         print(
@@ -207,7 +253,7 @@ class LemuVM:
         )
 
         with open(self.log_file, "a", encoding="utf-8") as log_f:
-            res = subprocess.run(cmd, stdout=log_f, stderr=log_f)
+            res = subprocess.run(cmd, stdout=log_f, stderr=log_f, env=env)
 
         if res.returncode != 0:
             print(f"[-] Failed to launch QEMU instance {self.vmid}. See {self.log_file}")
