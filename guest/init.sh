@@ -52,10 +52,13 @@ function init_misc()
 			rmmod_if_exist iwlmvm $wifi
 		fi
 		if [ ! -d /sys/class/net/wlan0 ]; then
-			ifconfig $eth down
-			ip link set $eth name wifi_eth
-			ifconfig wifi_eth up
-			ip link add link wifi_eth name wlan0 type virt_wifi
+			# Keep the physical NIC named eth0: ConnectivityService's
+			# EthernetTracker only registers interfaces matching ethN, and
+			# without that registration apps see "no internet" even though
+			# the interface has a route. The virtual wifi is layered on top
+			# of it without renaming the parent.
+			ifconfig $eth up
+			ip link add link $eth name wlan0 type virt_wifi
 		fi
 	fi
 }
@@ -432,13 +435,14 @@ function lemu_provision()
 
 function lemu_network()
 {
-	# QEMU user-mode networking: the virtio NIC enumerates as eth0 and
-	# init_misc() has already renamed it to wifi_eth. Assign the SLIRP address,
-	# install a default route, and add a main-table rule ahead of Android's
-	# per-UID/per-network rules so unprivileged apps inherit it.
-	if [ -d /sys/class/net/wifi_eth ]; then
-		ifconfig wifi_eth 10.0.2.15 netmask 255.255.255.0 up
-		ip route add default via 10.0.2.2 dev wifi_eth 2> /dev/null
+	# QEMU user-mode networking: the virtio NIC enumerates as eth0 (kept as
+	# eth0 so ConnectivityService registers it as the default network; the
+	# framework DHCP handles it from bootcompletion on). Assign the SLIRP
+	# address, install a default route, and add a main-table rule ahead of
+	# Android's per-UID/per-network rules so unprivileged apps inherit it.
+	if [ -d /sys/class/net/eth0 ]; then
+		ifconfig eth0 10.0.2.15 netmask 255.255.255.0 up
+		ip route add default via 10.0.2.2 dev eth0 2> /dev/null
 		ip rule add pref 9000 from all lookup main 2> /dev/null
 		setprop net.dns1 10.0.2.3
 		setprop net.dns2 8.8.8.8
