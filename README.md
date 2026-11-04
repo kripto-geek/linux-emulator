@@ -1,4 +1,4 @@
-# Lemu - MEmu Play Reconstructed for Linux (Omarchy / Arch Linux)
+# Lemu - MEmu Play Reconstructed for Linux (Omarchy / Arch Linux) (IN PROGRESS...)
 
 **Lemu** is a native Linux reconstruction of the **MEmu Play** Android gaming
 emulator, reverse-engineered from the Windows installer
